@@ -33,7 +33,7 @@ parser.add_argument('--grad-norm', type=float, default=1.0)
 parser.add_argument('--silent', action='store_true',
 	help='Flag to supress training progress bar for each epoch')
 parser.add_argument('--multigpu', action='store_true')
-parser.add_argument('--lr', type=float, default=0.0001)
+parser.add_argument('--lr', type=float, default=0.00001)
 parser.add_argument('--warmup', type=int, default=10000)
 parser.add_argument('--context-max-length', type=int, default=128)
 parser.add_argument('--gloss-max-length', type=int, default=32)

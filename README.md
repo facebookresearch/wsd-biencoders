@@ -2,7 +2,7 @@
 
 This is the codebase for the paper [Moving Down the Long Tail of Word Sense Disambiguation with Gloss Informed Bi-encoders](https://blvns.github.io/papers/acl2020.pdf). 
 
-![Architecture of the gloss informed bi-encoder model for WSD](https://github.com/facebookresearch/wsd-biencoders/blob/master/docs/wsd_biencoder_architecture.jpg)
+![Architecture of the gloss informed bi-encoder model for WSD](https://github.com/facebookresearch/wsd-biencoders/blob/main/docs/wsd_biencoder_architecture.jpg)
 Our bi-encoder model consists of two independent, transformer encoders: (1) a context encoder, which represents the target word (and its surrounding context) and (2) a gloss encoder, that embeds the definition text for each word sense. Each encoder is initalized with a pertrained model and optimized independently.
 
 ## Dependencies 

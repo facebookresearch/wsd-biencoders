@@ -21,6 +21,7 @@ from pytorch_transformers import *
 
 import random
 import numpy as np
+import json
 
 from wsd_models.util import *
 from wsd_models.models import BiEncoderModel
@@ -37,9 +38,9 @@ parser.add_argument('--lr', type=float, default=0.00001)
 parser.add_argument('--warmup', type=int, default=10000)
 parser.add_argument('--context-max-length', type=int, default=128)
 parser.add_argument('--gloss-max-length', type=int, default=32)
-parser.add_argument('--epochs', type=int, default=20)
+parser.add_argument('--epochs', type=int, default=1)
 parser.add_argument('--context-bsz', type=int, default=4)
-parser.add_argument('--gloss-bsz', type=int, default=256)
+parser.add_argument('--gloss-bsz', type=int, default=64)
 parser.add_argument('--encoder-name', type=str, default='bert-base',
 	choices=['bert-base', 'bert-large', 'roberta-base', 'roberta-large'])
 parser.add_argument('--ckpt', type=str, required=True,
@@ -88,6 +89,7 @@ def tokenize_glosses(gloss_arr, tokenizer, max_len):
 def load_and_preprocess_glosses(data, tokenizer, wn_senses, max_len=-1):
 	sense_glosses = {}
 	sense_weights = {}
+	sense_word_names = {}
 
 	gloss_lengths = []
 
@@ -97,9 +99,11 @@ def load_and_preprocess_glosses(data, tokenizer, wn_senses, max_len=-1):
 				continue #ignore unlabeled words
 			else:
 				key = generate_key(lemma, pos)
+				# print('ZYZ！！！   key: ', key
 				if key not in sense_glosses:
 					#get all sensekeys for the lemma/pos pair
 					sensekey_arr = wn_senses[key]
+					sense_word_names[key] = [wn.lemma_from_key(s).synset().name() for s in sensekey_arr]
 					#get glosses for all candidate senses
 					gloss_arr = [wn.lemma_from_key(s).synset().definition() for s in sensekey_arr]
 
@@ -113,6 +117,7 @@ def load_and_preprocess_glosses(data, tokenizer, wn_senses, max_len=-1):
 					sense_weights[key] = [0]*len(gloss_arr)
 					w_idx = sensekey_arr.index(label)
 					sense_weights[key][w_idx] += 1
+					sense_word_names[key] = sense_word_names[key][w_idx]
 				else:
 					#update sense weight counts
 					w_idx = sense_glosses[key][2].index(label)
@@ -126,7 +131,9 @@ def load_and_preprocess_glosses(data, tokenizer, wn_senses, max_len=-1):
 		total_w = sum(sense_weights[key])
 		sense_weights[key] = torch.FloatTensor([total_w/x if x !=0 else 0 for x in sense_weights[key]])
 
-	return sense_glosses, sense_weights
+	print('ZYZ！！！   sense_word_names: ', sense_word_names)
+
+	return sense_glosses, sense_weights, sense_word_names
 
 def preprocess_context(tokenizer, text_data, bsz=1, max_len=-1):
 	if max_len == -1: assert bsz==1 #otherwise need max_length for padding
@@ -211,9 +218,10 @@ def preprocess_context(tokenizer, text_data, bsz=1, max_len=-1):
 	else:  
 		return data
 
-def _train(train_data, model, gloss_dict, optim, schedule, criterion, gloss_bsz=-1, max_grad_norm=1.0, multigpu=False, silent=False, train_steps=-1):
+def _train(train_data, model, gloss_dict, sense_word_names, optim, schedule, criterion, gloss_bsz=-1, max_grad_norm=1.0, multigpu=False, silent=False, train_steps=-1):
 	model.train()
 	total_loss = 0.
+	gloss_embedding = {}
 
 	start_time = time.time()
 
@@ -241,6 +249,7 @@ def _train(train_data, model, gloss_dict, optim, schedule, criterion, gloss_bsz=
 
 			#run example's glosses through gloss encoder
 			gloss_ids, gloss_attn_mask, sense_keys = gloss_dict[key]
+			# print('ZYZ！！！   labels: ', labels)
 			if multigpu:
 				gloss_ids = gloss_ids.to(gloss_device)
 				gloss_attn_mask = gloss_attn_mask.to(gloss_device)
@@ -249,13 +258,19 @@ def _train(train_data, model, gloss_dict, optim, schedule, criterion, gloss_bsz=
 				gloss_attn_mask = gloss_attn_mask.cuda()
 
 			gloss_output = model.gloss_forward(gloss_ids, gloss_attn_mask)
+			# TODO 这里应该是sense embeddings
 			gloss_output = gloss_output.transpose(0,1)
+
+			# 存储字典
+			gloss_output_list = gloss_output.tolist()
+			gloss_embedding.update({sense_word_names[key]:gloss_output_list})
 			
 			#get cosine sim of example from context encoder with gloss embeddings
 			if multigpu:
 				output = output.cpu()
 				gloss_output = gloss_output.cpu()
 			
+			# TODO 这里的output应该就是Scores
 			output = torch.mm(output, gloss_output)
 
 			#get label and calculate loss
@@ -301,7 +316,7 @@ def _train(train_data, model, gloss_dict, optim, schedule, criterion, gloss_bsz=
 		#stop epoch early if number of training steps is reached
 		if train_steps > 0 and i+1 == train_steps: break
 
-	return model, optim, schedule, total_loss
+	return model, optim, schedule, total_loss, gloss_embedding
 
 def _eval(eval_data, model, gloss_dict, multigpu=False):
 	model.eval()
@@ -369,8 +384,8 @@ def train_model(args):
 	#load gloss dictionary (all senses from wordnet for each lemma/pos pair that occur in data)
 	wn_path = os.path.join(args.data_path, 'Data_Validation/candidatesWN30.txt')
 	wn_senses = load_wn_senses(wn_path)
-	train_gloss_dict, train_gloss_weights = load_and_preprocess_glosses(train_data, tokenizer, wn_senses, max_len=args.gloss_max_length)
-	semeval2007_gloss_dict, _ = load_and_preprocess_glosses(semeval2007_data, tokenizer, wn_senses, max_len=args.gloss_max_length)
+	train_gloss_dict, train_gloss_weights, sense_word_names = load_and_preprocess_glosses(train_data, tokenizer, wn_senses, max_len=args.gloss_max_length)
+	semeval2007_gloss_dict, _, _ = load_and_preprocess_glosses(semeval2007_data, tokenizer, wn_senses, max_len=args.gloss_max_length)
 
 	#preprocess and batch data (context + glosses)
 	train_data = preprocess_context(tokenizer, train_data, bsz=args.context_bsz, max_len=args.context_max_length)
@@ -437,7 +452,7 @@ def train_model(args):
 		if epoch == epochs and overflow_steps > 0: train_steps = overflow_steps
 
 		#train model for one epoch or given number of training steps
-		model, optimizer, schedule, train_loss = _train(train_data, model, train_gloss_dict, optimizer, schedule, criterion, gloss_bsz=args.gloss_bsz, max_grad_norm=args.grad_norm, silent=args.silent, multigpu=args.multigpu, train_steps=train_steps)
+		model, optimizer, schedule, train_loss, gloss_embedding = _train(train_data, model, train_gloss_dict, sense_word_names, optimizer, schedule, criterion, gloss_bsz=args.gloss_bsz, max_grad_norm=args.grad_norm, silent=args.silent, multigpu=args.multigpu, train_steps=train_steps)
 
 		#eval model on dev set (semeval2007)
 		eval_preds = _eval(semeval2007_data, model, semeval2007_gloss_dict, multigpu=args.multigpu)
@@ -464,6 +479,11 @@ def train_model(args):
 			with open(model_fname, 'wb') as f:
 				torch.save(model.state_dict(), f)
 			sys.stdout.flush()
+
+			# 将字典存储至txt文件 
+			gloss_dic_fname = os.path.join(args.ckpt, 'gloss_dic.txt')
+			with open(gloss_dic_fname,'w') as f:
+				json.dump(gloss_embedding, f, ensure_ascii=False)
 
 		#shuffle train set ordering after every epoch
 		random.shuffle(train_data)
